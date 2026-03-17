@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/spf13/pflag"
 )
 
 // ============================================================
@@ -190,29 +191,28 @@ func parseFlags() Config {
 	var include, match, exclude, excludeMatch string
 	var maxKB int64
 
-	flag.StringVar(&cfg.RootDir, "dir", ".", "Root directory to scan")
-	flag.StringVar(&cfg.OutputFile, "o", "", "Output markdown file")
-	flag.StringVar(&include, "i", "", "Include extensions (e.g. .go,.js)")
-	flag.StringVar(&match, "m", "", "Include path keywords (e.g. _test.go)")
-	flag.StringVar(&exclude, "x", "", "Exclude extensions (e.g. .exe,.o)")
-	flag.StringVar(&excludeMatch, "xm", "", "Exclude path keywords (e.g. vendor/)")
-	flag.Int64Var(&maxKB, "max-size", 500, "Max file size in KB")
-	flag.BoolVar(&cfg.NoSubdirs, "no-subdirs", false, "Do not scan subdirectories")
-	flag.BoolVar(&cfg.NoSubdirs, "ns", false, "Alias for --no-subdirs")
-	flag.BoolVar(&cfg.Verbose, "v", false, "Verbose output")
-	flag.BoolVar(&cfg.Version, "version", false, "Show version")
-	flag.BoolVar(&cfg.ShowStats, "s", false, "Show project statistics only")
-	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Preview which files would be included (no output written)")
-	flag.BoolVar(&cfg.DryRun, "n", false, "Alias for --dry-run")
+	pflag.StringVar(&cfg.RootDir, "dir", ".", "Root directory to scan")
+	pflag.StringVarP(&cfg.OutputFile, "output", "o", "", "Output markdown file")
+	pflag.StringVarP(&include, "include", "i", "", "Include extensions (e.g. .go,.js)")
+	pflag.StringVarP(&match, "match", "m", "", "Include path keywords (e.g. _test.go)")
+	pflag.StringVarP(&exclude, "exclude", "x", "", "Exclude extensions (e.g. .exe,.o)")
+	pflag.StringVar(&excludeMatch, "exclude-match", "", "Exclude path keywords (e.g. vendor/)")
+	pflag.Int64Var(&maxKB, "max-size", 500, "Max file size in KB")
+	pflag.BoolVar(&cfg.NoSubdirs, "no-subdirs", false, "Do not scan subdirectories")
+	pflag.BoolVar(&cfg.NoSubdirs, "ns", false, "Alias for --no-subdirs")
+	pflag.BoolVarP(&cfg.Verbose, "verbose", "v", false, "Verbose output")
+	pflag.BoolVar(&cfg.Version, "version", false, "Show version")
+	pflag.BoolVarP(&cfg.ShowStats, "stats", "s", false, "Show project statistics only")
+	pflag.BoolVarP(&cfg.DryRun, "dry-run", "n", false, "Preview which files would be included (no output written)")
 
-	flag.Parse()
+	pflag.Parse()
 
 	if cfg.Version {
 		fmt.Printf("gen-docs %s\n", versionStr)
 		os.Exit(0)
 	}
 
-	if args := flag.Args(); len(args) > 0 {
+	if args := pflag.Args(); len(args) > 0 {
 		cfg.RootDir = args[0]
 	}
 
