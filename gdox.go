@@ -266,6 +266,7 @@ func scanDirectory(config Config) ([]FileMetadata, Stats, []SkippedFile) {
 		}
 
 		lineCount := countLines(path)
+		tokens := estimateTokens(path)
 		fMeta := FileMetadata{RelPath: relPath, FullPath: path, Size: info.Size(), LineCount: lineCount}
 		files = append(files, fMeta)
 
@@ -273,6 +274,7 @@ func scanDirectory(config Config) ([]FileMetadata, Stats, []SkippedFile) {
 		stats.FileCount++
 		stats.TotalSize += fMeta.Size
 		stats.TotalLines += fMeta.LineCount
+		stats.TotalTokens += tokens
 
 		dir := filepath.Dir(relPath)
 		if _, ok := stats.DirMap[dir]; !ok { stats.DirMap[dir] = &DirStats{Path: dir} }

@@ -1,6 +1,6 @@
 {
   "name": "@yuanguangshan/gdox",
-  "version": "2.0.1",
+  "version": "3.0.0",
   "description": "一键生成项目代码快照，为 AI 辅助开发与架构审计而生。",
   "main": "index.js",
   "bin": {
