@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -20,7 +19,7 @@ import (
 //  Configuration & Data Types
 // ============================================================
 
-const versionStr = "v3.2.0"
+const versionStr = "v3.2.1"
 
 type Config struct {
 	RootDir           string
@@ -55,6 +54,9 @@ type Stats struct {
 	TotalLines         int
 	Skipped            int
 	DirCount           int
+	
+	DirMap             map[string]*DirStats
+	ExtMap             map[string]*ExtStats
 }
 
 type SkippedFile struct {
@@ -77,7 +79,7 @@ type ExtStats struct {
 }
 
 // ============================================================
-//  Ignore Rules
+//  Ignore Rules & Language Map
 // ============================================================
 
 var ignoreDirs = map[string]bool{
@@ -128,11 +130,6 @@ func main() {
 		return
 	}
 
-	if config.Verbose {
-		fmt.Printf("▶ Root directory: %s\n", config.RootDir)
-		fmt.Printf("▶ Output file: %s\n", config.OutputFile)
-	}
-
 	if !config.DryRun {
 		fmt.Println("▶ Gdox Started")
 	} else {
@@ -144,12 +141,20 @@ func main() {
 	// 1. Scan and filter
 	files, stats, skipped := scanDirectory(config)
 
+	// 2. Output to Terminal
 	if config.DryRun {
 		printDryRun(files, stats, skipped)
+	}
+	
+	if config.ShowStats || config.DryRun {
+		printStatsTerminal(files, stats)
+	}
+
+	if config.DryRun {
 		return
 	}
 
-	// 2. Generate content
+	// 3. Generate content
 	err := generateOutput(config, files, stats)
 	if err != nil {
 		fmt.Printf("❌ Error generating output: %v\n", err)
@@ -158,8 +163,6 @@ func main() {
 
 	duration := time.Since(startTime)
 	fmt.Printf("\n✨ Done! Generated %s in %v\n", config.OutputFile, duration)
-	fmt.Printf("📊 Files processed: %d | Total lines: %d | Total size: %.2f KB\n",
-		stats.FileCount, stats.TotalLines, float64(stats.TotalSize)/1024)
 }
 
 func parseFlags() Config {
@@ -168,40 +171,30 @@ func parseFlags() Config {
 	pflag.StringVarP(&c.OutputFile, "out", "o", "project_snapshot.md", "Output markdown file")
 	
 	var incExts, incMatches, excExts, excMatches, addIgnores string
-	pflag.StringVarP(&incExts, "include", "i", "", "Include extensions (comma separated, e.g. go,js)")
-	pflag.StringVarP(&incMatches, "match", "m", "", "Include path keywords (comma separated, e.g. _test.go)")
+	pflag.StringVarP(&incExts, "include", "i", "", "Include extensions (comma separated)")
+	pflag.StringVarP(&incMatches, "match", "m", "", "Include path keywords (comma separated)")
 	pflag.StringVarP(&excExts, "exclude", "x", "", "Exclude extensions (comma separated)")
-	pflag.StringVarP(&excMatches, "exclude-match", "X", "", "Exclude path keywords (comma separated, e.g. vendor/)")
+	pflag.StringVarP(&excMatches, "exclude-match", "X", "", "Exclude path keywords (comma separated)")
 	pflag.StringVarP(&addIgnores, "ignore", "", "", "Additional ignore patterns (comma separated)")
 
 	pflag.Int64Var(&c.MaxFileSize, "max-size", 500, "Max file size in KB")
 	pflag.BoolVarP(&c.NoSubdirs, "no-subdirs", "n", false, "Do not scan subdirectories")
 	pflag.BoolVarP(&c.Verbose, "verbose", "v", false, "Verbose output")
 	pflag.BoolVar(&c.Version, "version", false, "Show version")
-	pflag.BoolVarP(&c.ShowStats, "stats", "s", false, "Show detailed statistics")
+	pflag.BoolVarP(&c.ShowStats, "stats", "s", false, "Show detailed multi-dimensional statistics")
 	pflag.BoolVar(&c.DryRun, "dry-run", false, "Dry run mode (no file write)")
 	pflag.BoolVar(&c.NoDefaultIgnore, "no-default-ignore", false, "Disable default ignore rules")
 	pflag.BoolVar(&c.NoGitignore, "no-gitignore", false, "Do not load .gitignore")
 
 	pflag.Parse()
 
-	if incExts != "" {
-		c.IncludeExts = cleanList(incExts)
-	}
-	if incMatches != "" {
-		c.IncludeMatches = cleanList(incMatches)
-	}
-	if excExts != "" {
-		c.ExcludeExts = cleanList(excExts)
-	}
-	if excMatches != "" {
-		c.ExcludeMatches = cleanList(excMatches)
-	}
-	if addIgnores != "" {
-		c.AdditionalIgnores = cleanList(addIgnores)
-	}
+	if incExts != "" { c.IncludeExts = cleanList(incExts) }
+	if incMatches != "" { c.IncludeMatches = cleanList(incMatches) }
+	if excExts != "" { c.ExcludeExts = cleanList(excExts) }
+	if excMatches != "" { c.ExcludeMatches = cleanList(excMatches) }
+	if addIgnores != "" { c.AdditionalIgnores = cleanList(addIgnores) }
 
-	c.MaxFileSize *= 1024 // KB to Bytes
+	c.MaxFileSize *= 1024
 	absRoot, _ := filepath.Abs(c.RootDir)
 	c.RootDir = absRoot
 
@@ -213,13 +206,11 @@ func cleanList(s string) []string {
 	var res []string
 	for _, p := range parts {
 		trimmed := strings.TrimSpace(p)
-		if trimmed != "" {
-			if !strings.HasPrefix(trimmed, ".") && len(trimmed) > 0 && !strings.Contains(trimmed, "/") && !strings.Contains(trimmed, "\\") {
-				// Likely an extension without dot
-				res = append(res, "."+trimmed)
-			} else {
-				res = append(res, trimmed)
-			}
+		if trimmed == "" { continue }
+		if !strings.HasPrefix(trimmed, ".") && !strings.ContainsAny(trimmed, "/\\") {
+			res = append(res, "."+trimmed)
+		} else {
+			res = append(res, trimmed)
 		}
 	}
 	return res
@@ -231,53 +222,38 @@ func cleanList(s string) []string {
 
 func scanDirectory(config Config) ([]FileMetadata, Stats, []SkippedFile) {
 	var files []FileMetadata
-	var stats Stats
+	stats := Stats{
+		DirMap: make(map[string]*DirStats),
+		ExtMap: make(map[string]*ExtStats),
+	}
 	var skipped []SkippedFile
 
-	gitignorePatterns := []string{}
+	gitPatterns := []string{}
 	if !config.NoGitignore {
-		gitignorePatterns = loadGitignore(config.RootDir)
+		gitPatterns = loadGitignore(config.RootDir)
 	}
 
-	err := filepath.WalkDir(config.RootDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if config.Verbose {
-				fmt.Printf("⚠️ Error accessing %s: %v\n", path, err)
-			}
-			return nil
-		}
-
+	filepath.WalkDir(config.RootDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil { return nil }
 		relPath, _ := filepath.Rel(config.RootDir, path)
-		if relPath == "." {
-			return nil
-		}
+		if relPath == "." { return nil }
 
-		// 1. Directory Checks
 		if d.IsDir() {
-			if shouldIgnoreDir(relPath, config, gitignorePatterns) {
-				if config.Verbose {
-					fmt.Printf("⏭ Ignoring directory: %s\n", relPath)
-				}
-				return filepath.SkipDir
-			}
-			if config.NoSubdirs && relPath != "." && strings.Contains(relPath, string(filepath.Separator)) {
-				return filepath.SkipDir
-			}
+			if shouldIgnoreDir(relPath, config, gitPatterns) { return filepath.SkipDir }
+			if config.NoSubdirs && strings.Contains(relPath, string(filepath.Separator)) { return filepath.SkipDir }
 			stats.DirCount++
 			return nil
 		}
 
-		// 2. File Checks
 		stats.PotentialMatches++
-
-		if shouldIgnoreFile(relPath, config, gitignorePatterns) {
+		if shouldIgnoreFile(relPath, config, gitPatterns) {
 			stats.ExplicitlyExcluded++
 			return nil
 		}
 
 		info, _ := d.Info()
 		if info.Size() > config.MaxFileSize {
-			skipped = append(skipped, SkippedFile{relPath, fmt.Sprintf("Size exceeds %d KB", config.MaxFileSize/1024)})
+			skipped = append(skipped, SkippedFile{relPath, "Size limit"})
 			stats.Skipped++
 			return nil
 		}
@@ -288,319 +264,240 @@ func scanDirectory(config Config) ([]FileMetadata, Stats, []SkippedFile) {
 			return nil
 		}
 
-		// 3. Metadata Collection
 		lineCount := countLines(path)
-		files = append(files, FileMetadata{
-			RelPath:   relPath,
-			FullPath:  path,
-			Size:      info.Size(),
-			LineCount: lineCount,
-		})
+		fMeta := FileMetadata{RelPath: relPath, FullPath: path, Size: info.Size(), LineCount: lineCount}
+		files = append(files, fMeta)
 
+		// Accumulate Stats
 		stats.FileCount++
-		stats.TotalSize += info.Size()
-		stats.TotalLines += lineCount
+		stats.TotalSize += fMeta.Size
+		stats.TotalLines += fMeta.LineCount
+
+		dir := filepath.Dir(relPath)
+		if _, ok := stats.DirMap[dir]; !ok { stats.DirMap[dir] = &DirStats{Path: dir} }
+		stats.DirMap[dir].FileCount++
+		stats.DirMap[dir].TotalSize += fMeta.Size
+		stats.DirMap[dir].TotalLines += fMeta.LineCount
+
+		ext := strings.ToLower(filepath.Ext(relPath))
+		if ext == "" { ext = "[no ext]" }
+		if _, ok := stats.ExtMap[ext]; !ok { stats.ExtMap[ext] = &ExtStats{Ext: ext} }
+		stats.ExtMap[ext].FileCount++
+		stats.ExtMap[ext].TotalSize += fMeta.Size
+		stats.ExtMap[ext].TotalLines += fMeta.LineCount
 
 		return nil
 	})
-
-	if err != nil && config.Verbose {
-		fmt.Printf("❌ Walk error: %v\n", err)
-	}
 
 	return files, stats, skipped
 }
 
 func shouldIgnoreDir(relPath string, config Config, gitPatterns []string) bool {
 	name := filepath.Base(relPath)
-	
-	if !config.NoDefaultIgnore {
-		if ignoreDirs[name] {
-			return true
-		}
-	}
-
-	for _, pattern := range config.AdditionalIgnores {
-		if matchPattern(relPath, pattern) {
-			return true
-		}
-	}
-
-	for _, pattern := range gitPatterns {
-		if matchPattern(relPath, pattern) {
-			return true
-		}
-	}
-
+	if !config.NoDefaultIgnore && ignoreDirs[name] { return true }
+	for _, p := range config.AdditionalIgnores { if matchPattern(relPath, p) { return true } }
+	for _, p := range gitPatterns { if matchPattern(relPath, p) { return true } }
 	return false
 }
 
 func shouldIgnoreFile(relPath string, config Config, gitPatterns []string) bool {
 	name := filepath.Base(relPath)
 	ext := filepath.Ext(relPath)
-
-	// Default ignores
-	if !config.NoDefaultIgnore {
-		if ignoreFiles[name] {
-			return true
-		}
-	}
-
-	// Extension includes
+	if !config.NoDefaultIgnore && ignoreFiles[name] { return true }
 	if len(config.IncludeExts) > 0 {
-		found := false
-		for _, e := range config.IncludeExts {
-			if strings.EqualFold(ext, e) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return true
-		}
+		match := false
+		for _, e := range config.IncludeExts { if strings.EqualFold(ext, e) { match = true; break } }
+		if !match { return true }
 	}
-
-	// Path keyword includes
 	if len(config.IncludeMatches) > 0 {
-		found := false
-		for _, m := range config.IncludeMatches {
-			if strings.Contains(relPath, m) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return true
-		}
+		match := false
+		for _, m := range config.IncludeMatches { if strings.Contains(relPath, m) { match = true; break } }
+		if !match { return true }
 	}
-
-	// Extension excludes
-	for _, e := range config.ExcludeExts {
-		if strings.EqualFold(ext, e) {
-			return true
-		}
-	}
-
-	// Path keyword excludes
-	for _, m := range config.ExcludeMatches {
-		if strings.Contains(relPath, m) {
-			return true
-		}
-	}
-
-	// Custom ignores
-	for _, pattern := range config.AdditionalIgnores {
-		if matchPattern(relPath, pattern) {
-			return true
-		}
-	}
-
-	// Gitignore
-	for _, pattern := range gitPatterns {
-		if matchPattern(relPath, pattern) {
-			return true
-		}
-	}
-
+	for _, e := range config.ExcludeExts { if strings.EqualFold(ext, e) { return true } }
+	for _, m := range config.ExcludeMatches { if strings.Contains(relPath, m) { return true } }
+	for _, p := range gitPatterns { if matchPattern(relPath, p) { return true } }
 	return false
 }
 
 func loadGitignore(root string) []string {
-	var patterns []string
-	gitPath := filepath.Join(root, ".gitignore")
-	data, err := os.ReadFile(gitPath)
-	if err != nil {
-		return patterns
-	}
-
+	data, err := os.ReadFile(filepath.Join(root, ".gitignore"))
+	if err != nil { return nil }
+	var res []string
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		patterns = append(patterns, line)
+		l := strings.TrimSpace(scanner.Text())
+		if l != "" && !strings.HasPrefix(l, "#") { res = append(res, l) }
 	}
-	return patterns
+	return res
 }
 
 func matchPattern(path, pattern string) bool {
-	// Simple glob matching
-	matched, _ := filepath.Match(pattern, filepath.Base(path))
-	if matched {
-		return true
-	}
-	// Simple path prefix matching
-	if strings.HasPrefix(path, pattern) {
-		return true
-	}
-	return false
+	m, _ := filepath.Match(pattern, filepath.Base(path))
+	return m || strings.HasPrefix(path, pattern)
 }
 
 func isBinaryFile(path string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return true
-	}
+	f, _ := os.Open(path)
 	defer f.Close()
-
-	buffer := make([]byte, 1024)
-	n, err := f.Read(buffer)
-	if err != nil && err != io.EOF {
-		return true
+	buf := make([]byte, 1024)
+	n, _ := f.Read(buf)
+	if n == 0 { return false }
+	if !utf8.Valid(buf[:n]) {
+		for _, b := range buf[:n] { if b == 0 { return true } }
 	}
-
-	if n == 0 {
-		return false
-	}
-
-	if !utf8.Valid(buffer[:n]) {
-		// Check for common non-text bytes
-		for _, b := range buffer[:n] {
-			if b == 0 {
-				return true
-			}
-		}
-	}
-
 	return false
 }
 
 func countLines(path string) int {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0
-	}
+	f, _ := os.Open(path)
 	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	count := 0
-	for scanner.Scan() {
-		count++
-	}
-	return count
+	s := bufio.NewScanner(f)
+	n := 0
+	for s.Scan() { n++ }
+	return n
 }
 
 // ============================================================
-//  Output Generation
+//  Statistics & Output
 // ============================================================
+
+func printStatsTerminal(files []FileMetadata, stats Stats) {
+	fmt.Printf("\n📊 Project Statistics Summary\n")
+	fmt.Printf("  %-20s %d\n", "Files Processed:", stats.FileCount)
+	fmt.Printf("  %-20s %d\n", "Total Lines:", stats.TotalLines)
+	fmt.Printf("  %-20s %.2f KB\n", "Total Size:", float64(stats.TotalSize)/1024)
+	fmt.Printf("  %-20s %d\n", "Directories:", stats.DirCount)
+
+	// 1. Top Files by Line Count
+	sort.Slice(files, func(i, j int) bool { return files[i].LineCount > files[j].LineCount })
+	fmt.Printf("\n%-45s %12s %12s\n", "🔝 Top Files (by Lines):", "Lines", "Size")
+	fmt.Printf("%-45s %12s %12s\n", "---------------------------------------------", "-----", "----")
+	for i := 0; i < len(files) && i < 5; i++ {
+		fmt.Printf("%-45s %12d %11.2f KB\n", files[i].RelPath, files[i].LineCount, float64(files[i].Size)/1024)
+	}
+
+	// 2. Directory Dimension
+	dirs := make([]*DirStats, 0, len(stats.DirMap))
+	for _, d := range stats.DirMap { dirs = append(dirs, d) }
+	sort.Slice(dirs, func(i, j int) bool { return dirs[i].TotalLines > dirs[j].TotalLines })
+	fmt.Printf("\n%-30s %8s %12s %10s %12s %10s\n", "📁 Folder Dimension:", "Files", "Lines", "Lines %", "Size", "Size %")
+	fmt.Printf("%-30s %8s %12s %10s %12s %10s\n", "------------------------------", "-------", "-----------", "-------", "-----------", "-------")
+	for i := 0; i < len(dirs) && i < 10; i++ {
+		linePct := 0.0
+		if stats.TotalLines > 0 { linePct = float64(dirs[i].TotalLines) / float64(stats.TotalLines) * 100 }
+		sizePct := 0.0
+		if stats.TotalSize > 0 { sizePct = float64(dirs[i].TotalSize) / float64(stats.TotalSize) * 100 }
+		fmt.Printf("%-30s %8d %12d %9.1f%% %11.2f KB %9.1f%%\n", 
+			dirs[i].Path, dirs[i].FileCount, dirs[i].TotalLines, linePct, float64(dirs[i].TotalSize)/1024, sizePct)
+	}
+
+	// 3. Language Dimension
+	exts := make([]*ExtStats, 0, len(stats.ExtMap))
+	for _, e := range stats.ExtMap { exts = append(exts, e) }
+	sort.Slice(exts, func(i, j int) bool { return exts[i].TotalLines > exts[j].TotalLines })
+	fmt.Printf("\n%-15s %8s %12s %10s %12s %10s\n", "📝 Language:", "Files", "Lines", "Lines %", "Size", "Size %")
+	fmt.Printf("%-15s %8s %12s %10s %12s %10s\n", "---------------", "-------", "-----------", "-------", "-----------", "-------")
+	for _, e := range exts {
+		linePct := 0.0
+		if stats.TotalLines > 0 { linePct = float64(e.TotalLines) / float64(stats.TotalLines) * 100 }
+		sizePct := 0.0
+		if stats.TotalSize > 0 { sizePct = float64(e.TotalSize) / float64(stats.TotalSize) * 100 }
+		fmt.Printf("%-15s %8d %12d %9.1f%% %11.2f KB %9.1f%%\n", 
+			e.Ext, e.FileCount, e.TotalLines, linePct, float64(e.TotalSize)/1024, sizePct)
+	}
+}
 
 func generateOutput(config Config, files []FileMetadata, stats Stats) error {
 	out, err := os.Create(config.OutputFile)
-	if err != nil {
-		return err
-	}
+	if err != nil { return err }
 	defer out.Close()
+	w := bufio.NewWriter(out)
+	defer w.Flush()
 
-	writer := bufio.NewWriter(out)
-	defer writer.Flush()
+	fmt.Fprintf(w, "# Project Snapshot: %s\n\n", filepath.Base(config.RootDir))
+	fmt.Fprintf(w, "> Generated by [Gdox](https://github.com/yuanguangshan/gdox) on %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
 
-	// 1. Header
-	fmt.Fprintf(writer, "# Project Snapshot: %s\n\n", filepath.Base(config.RootDir))
-	fmt.Fprintf(writer, "> Generated by [Gdox](https://github.com/yuanguangshan/gdox) on %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
-
-	// 2. TOC
-	fmt.Fprintln(writer, "## Table of Contents")
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].RelPath < files[j].RelPath
-	})
-
+	fmt.Fprintln(w, "## Table of Contents")
+	sort.Slice(files, func(i, j int) bool { return files[i].RelPath < files[j].RelPath })
 	for _, f := range files {
-		anchor := generateAnchor(f.RelPath)
-		fmt.Fprintf(writer, "- [%s](#%s)\n", f.RelPath, anchor)
+		fmt.Fprintf(w, "- [%s](#%s)\n", f.RelPath, generateAnchor(f.RelPath))
 	}
-	fmt.Fprintln(writer, "\n---")
+	fmt.Fprintln(w, "\n---")
 
-	// 3. File Contents
 	for _, f := range files {
-		fmt.Fprintf(writer, "\n## %s\n\n", f.RelPath)
-		
-		content, err := os.ReadFile(f.FullPath)
-		if err != nil {
-			fmt.Fprintf(writer, "> ❌ Error reading file: %v\n", err)
-			continue
-		}
-
+		fmt.Fprintf(w, "\n## %s\n\n", f.RelPath)
+		c, _ := os.ReadFile(f.FullPath)
 		lang := detectLanguage(f.RelPath)
-		fence := determineFence(string(content))
-		
-		fmt.Fprintf(writer, "%s%s\n", fence, lang)
-		writer.Write(content)
-		if !bytes.HasSuffix(content, []byte("\n")) {
-			writer.WriteByte('\n')
-		}
-		fmt.Fprintf(writer, "%s\n", fence)
+		fence := determineFence(string(c))
+		fmt.Fprintf(w, "%s%s\n%s%s\n%s\n", fence, lang, string(c), func()string{if len(c)>0 && c[len(c)-1]!='\n'{return "\n"} ; return ""}(), fence)
 	}
 
-	// 4. Footer/Stats
 	if config.ShowStats {
-		fmt.Fprintln(writer, "\n---")
-		fmt.Fprintln(writer, "## Project Statistics")
-		fmt.Fprintf(writer, "- **Files Processed**: %d\n", stats.FileCount)
-		fmt.Fprintf(writer, "- **Total Lines**: %d\n", stats.TotalLines)
-		fmt.Fprintf(writer, "- **Total Size**: %.2f KB\n", float64(stats.TotalSize)/1024)
-		fmt.Fprintf(writer, "- **Directories**: %d\n", stats.DirCount)
-	}
+		fmt.Fprintln(w, "\n---")
+		fmt.Fprintln(w, "## Detailed Project Audit")
+		
+		fmt.Fprintln(w, "### 📈 Overview")
+		fmt.Fprintf(w, "- Files: %d\n- Lines: %d\n- Size: %.2f KB\n\n", stats.FileCount, stats.TotalLines, float64(stats.TotalSize)/1024)
 
+		fmt.Fprintln(w, "### 📁 Directory Distribution")
+		fmt.Fprintln(w, "| Directory | Files | Lines | Lines % | Size | Size % |")
+		fmt.Fprintln(w, "| :--- | :---: | :---: | :---: | :---: | :---: |")
+		dirs := make([]*DirStats, 0, len(stats.DirMap))
+		for _, d := range stats.DirMap { dirs = append(dirs, d) }
+		sort.Slice(dirs, func(i, j int) bool { return dirs[i].Path < dirs[j].Path })
+		for _, d := range dirs {
+			linePct := 0.0
+			if stats.TotalLines > 0 { linePct = float64(d.TotalLines) / float64(stats.TotalLines) * 100 }
+			sizePct := 0.0
+			if stats.TotalSize > 0 { sizePct = float64(d.TotalSize) / float64(stats.TotalSize) * 100 }
+			fmt.Fprintf(w, "| %s | %d | %d | %.1f%% | %.2f KB | %.1f%% |\n", d.Path, d.FileCount, d.TotalLines, linePct, float64(d.TotalSize)/1024, sizePct)
+		}
+
+		fmt.Fprintln(w, "\n### 📝 Language Breakdown")
+		fmt.Fprintln(w, "| Extension | Files | Lines | Lines % | Size | Size % |")
+		fmt.Fprintln(w, "| :--- | :---: | :---: | :---: | :---: | :---: |")
+		exts := make([]*ExtStats, 0, len(stats.ExtMap))
+		for _, e := range stats.ExtMap { exts = append(exts, e) }
+		sort.Slice(exts, func(i, j int) bool { return exts[i].TotalLines > exts[j].TotalLines })
+		for _, e := range exts {
+			linePct := 0.0
+			if stats.TotalLines > 0 { linePct = float64(e.TotalLines) / float64(stats.TotalLines) * 100 }
+			sizePct := 0.0
+			if stats.TotalSize > 0 { sizePct = float64(e.TotalSize) / float64(stats.TotalSize) * 100 }
+			fmt.Fprintf(w, "| %s | %d | %d | %.1f%% | %.2f KB | %.1f%% |\n", e.Ext, e.FileCount, e.TotalLines, linePct, float64(e.TotalSize)/1024, sizePct)
+		}
+	}
 	return nil
 }
 
-func generateAnchor(path string) string {
-	a := strings.ToLower(path)
-	a = strings.ReplaceAll(a, "/", "-")
-	a = strings.ReplaceAll(a, "\\", "-")
-	a = strings.ReplaceAll(a, ".", "-")
-	return a
+func generateAnchor(p string) string {
+	return strings.NewReplacer("/", "-", "\\", "-", ".", "-").Replace(strings.ToLower(p))
 }
 
-func detectLanguage(path string) string {
-	ext := strings.ToLower(filepath.Ext(path))
-	if lang, ok := languageMap[ext]; ok {
-		return lang
-	}
-	// Check for files without extensions
-	base := strings.ToLower(filepath.Base(path))
-	if base == "dockerfile" {
-		return "dockerfile"
-	}
-	if base == "makefile" {
-		return "makefile"
-	}
+func detectLanguage(p string) string {
+	ext := strings.ToLower(filepath.Ext(p))
+	if l, ok := languageMap[ext]; ok { return l }
+	base := strings.ToLower(filepath.Base(p))
+	if base == "dockerfile" || base == "makefile" { return base }
 	return ""
 }
 
-func determineFence(content string) string {
+func determineFence(c string) string {
 	max := 0
-	current := 0
-	for _, r := range content {
-		if r == '`' {
-			current++
-			if current > max {
-				max = current
-			}
-		} else {
-			current = 0
-		}
+	cur := 0
+	for _, r := range c {
+		if r == '`' { cur++; if cur > max { max = cur } } else { cur = 0 }
 	}
-	if max < 3 {
-		return "```"
-	}
+	if max < 3 { return "```" }
 	return strings.Repeat("`", max+1)
 }
 
 func printDryRun(files []FileMetadata, stats Stats, skipped []SkippedFile) {
-	fmt.Printf("\n🔍 [Dry-Run] Files to be included (%d):\n", len(files))
-	for _, f := range files {
-		fmt.Printf("  - %s (%d lines, %.2f KB)\n", f.RelPath, f.LineCount, float64(f.Size)/1024)
-	}
-
+	fmt.Printf("\n🔍 Files to be included (%d):\n", len(files))
+	for _, f := range files { fmt.Printf("  - %-40s (%d lines)\n", f.RelPath, f.LineCount) }
 	if len(skipped) > 0 {
-		fmt.Printf("\n⏭  Skipped files (%d):\n", len(skipped))
-		for _, s := range skipped {
-			fmt.Printf("  - %s [%s]\n", s.RelPath, s.Reason)
-		}
+		fmt.Printf("\n⏭  Skipped:\n")
+		for _, s := range skipped { fmt.Printf("  - %-40s [%s]\n", s.RelPath, s.Reason) }
 	}
-
-	fmt.Printf("\n📊 Potential files: %d | Excluded: %d | Final: %d\n",
-		stats.PotentialMatches, stats.ExplicitlyExcluded, stats.FileCount)
 }
