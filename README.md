@@ -15,7 +15,9 @@ bash install-gdox.sh
 ```bash
 gd                  # 扫描当前项目
 gd -i go,md         # 只包含 Go 和 Markdown 文件
-gd -x vendor        # 排除指定目录
+gd -x exe,bin       # 排除特定后缀
+gd -X vendor        # 排除指定目录关键字
+gd -n               # 不扫描子目录
 gd --dry-run        # 预览文件列表
 ```
 

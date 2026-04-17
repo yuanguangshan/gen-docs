@@ -19,14 +19,14 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yuanguangshan/gdox.git"
+    "url": "git+https://github.com/yuanguangshan/gen-docs.git"
   },
   "keywords": [],
-  "author": "",
+  "author": "苑广山",
   "license": "ISC",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/yuanguangshan/gdox/issues"
+    "url": "https://github.com/yuanguangshan/gen-docs/issues"
   },
-  "homepage": "https://github.com/yuanguangshan/gdox#readme"
+  "homepage": "https://github.com/yuanguangshan/gen-docs#readme"
 }
